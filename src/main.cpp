@@ -180,9 +180,9 @@ main(int argc, char * argv[])
 		gridSize = ceil(static_cast<float>(numElements) / static_cast<float>(blockSize));
 	}
 
-	//if (gridSize > 1024){
-	//	gridSize = 1024;
-	//}
+	if (gridSize > 1024){
+		gridSize = 1024;
+	}
 
 	cudaMalloc(&d_intermediateSums, 
 		static_cast<size_t>(gridSize * sizeof(*d_intermediateSums)));
@@ -201,8 +201,6 @@ main(int argc, char * argv[])
 		if(!improved){
 			reduction_Kernel_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
 			cudaDeviceSynchronize();
-			dim3 newBlockDim = (grid_dim.x <= 1024) ? grid_dim : dim3(1024);
-			//printf("blockDim = %i --- arraySize = %i\n", newBlockDim.x, gridSize);
 			reduction_Kernel_Wrapper(dim3(1), newBlockDim, gridSize, d_intermediateSums, d_dataOut);
 		}
 		else{
