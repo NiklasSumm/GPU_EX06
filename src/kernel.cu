@@ -97,31 +97,51 @@ void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, fl
 }
 
 __global__ void
-reduction_Kernel_improved(int numElements, int numElementsShared, float* dataIn, float* dataOut)
+reduction_Kernel_improved(int numElements, float* dataIn, float* dataOut)
 {
-	extern __shared__ float sh_Data[];
+	extern __shared__ int sPartials[];
 
-  	int tid = 2 * blockIdx.x * blockDim.x + threadIdx.x;
+	float blockSum = 0.0;
 
-  	sh_Data[threadIdx.x] = dataIn[tid] + dataIn[tid + blockDim.x];
+	int elemRoundUp = numElements;
 
-  	__syncthreads();
-
-  	for ( unsigned int o = blockDim.x / 2; o > 0; o >>= 1 ) {
-		if (threadIdx.x < o ) {
-			if (tid < numElements){
-				sh_Data[threadIdx.x] += sh_Data[threadIdx.x + o];
-			}
-		}
-		__syncthreads();
+	if (elemRoundUp % blockDim.x != 0){
+		elemRoundUp += blockDim.x - elemRoundUp % blockDim.x;
 	}
 
-  	if (threadIdx.x == 0) dataOut[blockIdx.x] = sh_Data[0];
+	const int tid = threadIdx.x;
+
+  	for (int i = 2 * blockIdx.x * blockDim.x + threadIdx.x; i < elemRoundUp; i += 2 * blockDim.x){
+		if (i < numElements){
+			if (i + blockDim.x < numElements){
+				sPartials[tid] = dataIn[i] + dataIn[i + blockDim.x];
+			}
+			else{
+				sPartials[tid] = dataIn[i];
+			}
+		}
+		else{
+			sPartials[tid] = 0;
+		}
+
+  		__syncthreads();
+
+  		for ( unsigned int o = blockDim.x / 2; o > 0; o >>= 1 ) {
+			if (tid < o ) {
+				sPartials[tid] += sPartials[tid + o];
+			}
+			__syncthreads();
+		}
+
+		blockSum += sPartials[0]
+	}
+
+  	if (tid == 0) dataOut[blockIdx.x] = blockSum;
 }
 
 void reduction_Kernel_improved_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut) {
 	int sharedMemSize = numElements * sizeof(float) / (gridSize.x * 2);
-	reduction_Kernel_improved<<< gridSize, blockSize, sharedMemSize>>>(numElements, sharedMemSize / sizeof(float), dataIn, dataOut);
+	reduction_Kernel_improved<<< gridSize, blockSize, sharedMemSize>>>(numElements, dataIn, dataOut);
 }
 
 //
