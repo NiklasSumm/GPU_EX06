@@ -92,7 +92,7 @@ reduction_Kernel(int numElements, float* dataIn, float* dataOut)
 }
 
 void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut) {
-	int sharedMemSize = numElements * sizeof(float) / gridSize.x;
+	int sharedMemSize = blockSize.x * sizeof(float);
 	reduction_Kernel<<< gridSize, blockSize, sharedMemSize>>>(numElements, dataIn, dataOut);
 }
 
