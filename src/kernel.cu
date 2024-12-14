@@ -17,43 +17,81 @@
 // Reduction_Kernel
 //
 __global__ void
-reduction_Kernel(int numElements, int numElementsShared, float* dataIn, float* dataOut)
+reduction_Kernel(int numElements, float* dataIn, float* dataOut)
 {
-  	extern __shared__ float sh_Data[];
+	extern __shared__ int sPartials[];
 
-	int iterations = numElementsShared + blockDim.x + 1 / blockDim.x;
+	float blockSum = 0.0;
 
-	for (int i = 0; i < iterations; i++){
-		int elementId = iterations * blockIdx.x * blockDim.x + threadIdx.x + i * blockDim.x;
-		int sharedId = threadIdx.x + i * blockDim.x;
-		if (sharedId < numElementsShared){
-			if (elementId < numElements){
-				sh_Data[sharedId] = dataIn[elementId];
-			}
-			else{
-				sh_Data[sharedId] = 0;
-			}
+	int elemRoundUp = numElements;
+
+	if (elemRoundUp % blockDim.x != 0){
+		elemRoundUp += blockDim.x - elemRoundUp % blockDim.x;
+	}
+
+	const int tid = threadIdx.x;
+
+	for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < elemRoundUp; i += blockDim.x){
+		if (i < numElements){
+			sPartials[tid] = dataIn[i];
 		}
-	}
+		else{
+			sPartials[tid] = 0;
+		}
 
-  	__syncthreads();
-
-  	for (unsigned int s = 1; s < blockDim.x * iterations; s *= 2) {
-		for (int i = 0; i < iterations; i++){
-			int id = threadIdx.x + i * blockDim.x;
-    		if ((id % (2 * s)) == 0) {
-				if (id + s < numElementsShared){
-					sh_Data[id] += sh_Data[id + s];
-				}
-    		}
-  		}
 		__syncthreads();
+
+		for ( unsigned int s = 1; s < blockDim.x; s *= 2 ) {
+			if ( tid % ( 2 * s ) == 0 ) {
+				sPartials[tid] += sPartials[tid + s];
+			}
+
+		__syncthreads();
+		}
+
+		blockSum += sPartials[0];
 	}
 
-  	if (threadIdx.x == 0) dataOut[blockIdx.x] = sh_Data[0];
+	if ( tid == 0 ) {
+		dataOut[blockIdx.x] = blockSum;
+	}
+
+
+  	//extern __shared__ float sh_Data[];
+//
+	//int iterations = numElementsShared + blockDim.x + 1 / blockDim.x;
+//
+	//for (int i = 0; i < iterations; i++){
+	//	int elementId = iterations * blockIdx.x * blockDim.x + threadIdx.x + i * blockDim.x;
+	//	int sharedId = threadIdx.x + i * blockDim.x;
+	//	if (sharedId < numElementsShared){
+	//		if (elementId < numElements){
+	//			sh_Data[sharedId] = dataIn[elementId];
+	//		}
+	//		else{
+	//			sh_Data[sharedId] = 0;
+	//		}
+	//	}
+	//}
+//
+  	//__syncthreads();
+//
+  	//for (unsigned int s = 1; s < blockDim.x * iterations; s *= 2) {
+	//	for (int i = 0; i < iterations; i++){
+	//		int id = threadIdx.x + i * blockDim.x;
+    //		if ((id % (2 * s)) == 0) {
+	//			if (id + s < numElementsShared){
+	//				sh_Data[id] += sh_Data[id + s];
+	//			}
+    //		}
+  	//	}
+	//	__syncthreads();
+	//}
+//
+  	//if (threadIdx.x == 0) dataOut[blockIdx.x] = sh_Data[0];
 }
 
-void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut) {
+void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, float* dataIn, float* dataOut) {
 	int sharedMemSize = numElements * sizeof(float) / gridSize.x;
 	reduction_Kernel<<< gridSize, blockSize, sharedMemSize>>>(numElements, sharedMemSize / sizeof(float), dataIn, dataOut);
 }
