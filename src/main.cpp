@@ -264,6 +264,8 @@ main(int argc, char * argv[])
 				<< " GB/s" << std::endl
 			  << "***    Time for Reduction: " << 1e3 * kernelTimer.getTime()
 				  << " ms" << std::endl
+			  << "***    Sustained bandwidth: " << 1e-9 * kernelTimer.getBandwidth(numElements * sizeof(*d_dataIn))
+				  << " ms" << std::endl
 			  << "***" << std::endl;
 
 	// Free Memory
