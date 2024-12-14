@@ -91,9 +91,9 @@ reduction_Kernel(int numElements, float* dataIn, float* dataOut)
   	//if (threadIdx.x == 0) dataOut[blockIdx.x] = sh_Data[0];
 }
 
-void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, float* dataIn, float* dataOut) {
+void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut) {
 	int sharedMemSize = numElements * sizeof(float) / gridSize.x;
-	reduction_Kernel<<< gridSize, blockSize, sharedMemSize>>>(numElements, sharedMemSize / sizeof(float), dataIn, dataOut);
+	reduction_Kernel<<< gridSize, blockSize, sharedMemSize>>>(numElements, dataIn, dataOut);
 }
 
 __global__ void
