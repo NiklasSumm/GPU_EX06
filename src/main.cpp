@@ -180,6 +180,10 @@ main(int argc, char * argv[])
 		gridSize = ceil(static_cast<float>(numElements) / static_cast<float>(blockSize));
 	}
 
+	if (gridSize > 8192){
+		gridSize = 8192;
+	}
+
 	cudaMalloc(&d_intermediateSums, 
 		static_cast<size_t>(gridSize * sizeof(*d_intermediateSums)));
 
