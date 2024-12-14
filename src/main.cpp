@@ -195,14 +195,11 @@ main(int argc, char * argv[])
 	
 	if(!chCommandLineGetBool("thrust", argc, argv)){
 		if(!improved){
-			printf("1");
 			reduction_Kernel_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
-			printf("2");
 			cudaDeviceSynchronize();
 			dim3 newBlockDim = (grid_dim.x <= 1024) ? grid_dim : dim3(1024);
-			printf("blockDim: %i", newBlockDim.x);
+			printf("blockDim = %i --- arraySize = %i\n", newBlockDim.x, gridSize);
 			reduction_Kernel_Wrapper(dim3(1), newBlockDim, gridSize, d_intermediateSums, d_dataOut);
-			printf("3");
 		}
 		else{
 			reduction_Kernel_improved_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
