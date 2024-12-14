@@ -133,7 +133,7 @@ reduction_Kernel_improved(int numElements, float* dataIn, float* dataOut)
 			__syncthreads();
 		}
 
-		blockSum += sPartials[0]
+		blockSum += sPartials[0];
 	}
 
   	if (tid == 0) dataOut[blockIdx.x] = blockSum;
