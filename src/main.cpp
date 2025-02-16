@@ -1,309 +1,349 @@
-/**************************************************************************************************
- *
- *       Computer Engineering Group, Heidelberg University - GPU Computing Exercise 06
- *
- *                 Gruppe : TODO
- *
- *                   File : main.cpp
- *
- *                Purpose : Reduction
- *
- **************************************************************************************************/
-
-#include <cmath>
-#include <iostream>
-#include <cstdlib>
-#include <chCommandLine.h>
+#include <cub/cub.cuh>
 #include <chTimer.hpp>
-#include <cuda_runtime.h>
 
-const static int DEFAULT_MATRIX_SIZE = 1024;
-const static int DEFAULT_BLOCK_DIM   =  128;
-
-//
-// Function Prototypes
-//
-void printHelp(char *);
+#include <encodingBase.h>
 
 
-extern void reduction_Kernel_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut);
-extern void reduction_Kernel_improved_Wrapper(dim3 gridSize, dim3 blockSize, int numElements, float* dataIn, float* dataOut);
+class TreeStructure {
+	public:
+		uint32_t *layers[5];
+		int layerSizes[5];
+};
 
-extern void thrust_reduction_Wrapper(int numElements, float* dataIn, float* dataOut);
 
-
-float CPU_reduction(int numElements, float* inData){
-
-	ChTimer timer;
-	timer.start();
-
-	float sum = 0.0;
-
-	for (int i = 0; i < numElements; i++){
-		sum += inData[i];
-	}
-
-	timer.stop();
-
-	std::cout << "CPU execution time: " << 1e3 * timer.getTime() << " ms" << std::endl
-		<< "CPU bandwidth: " << 1e-9 * timer.getBandwidth(numElements * sizeof(float)) << " GB/s" << std::endl;
-
-	return sum;
-}
-
-//
-// Main
-//
-int
-main(int argc, char * argv[])
+template <int blockSize>
+__global__ void
+setupKernel1(int numElements, long *input)
 {
-	bool showHelp = chCommandLineGetBool("h", argc, argv);
-	if (!showHelp)
-	{
-		showHelp = chCommandLineGetBool("help", argc, argv);
-	}
+	int iterations = (1023 + blockDim.x) / blockDim.x;
 
-	if (showHelp)
-	{
-		printHelp(argv[0]);
-		exit(0);
-	}
+	unsigned int aggregateSum = 0;
+	unsigned int aggregate = 0;
 
-	std::cout << "***" << std::endl
-			  << "*** Starting ..." << std::endl
-			  << "***" << std::endl;
+	using BlockScan = cub::BlockScan<unsigned int, blockSize>;
+	__shared__ typename BlockScan::TempStorage temp_storage;
 
-	ChTimer memCpyH2DTimer, memCpyD2HTimer;
-	ChTimer kernelTimer;
+	unsigned int elementId = 0;
+	for (int i = 0; i < iterations; i++) {
+		elementId = blockIdx.x * 1024 + i * blockDim.x + threadIdx.x;
 
-	//
-	// Allocate Memory
-	//
-	int numElements = 0;
-	chCommandLineGet<int>(&numElements, "s", argc, argv);
-	chCommandLineGet<int>(&numElements, "size", argc, argv);
-	numElements = numElements != 0 ?
-			numElements : DEFAULT_MATRIX_SIZE;
-	//
-	// Host Memory
-	//
-	bool pinnedMemory = chCommandLineGetBool("p", argc, argv);
-	if (!pinnedMemory)
-	{
-		pinnedMemory = chCommandLineGetBool("pinned-memory",argc,argv);
-	}
-
-	float* h_dataIn = NULL;
-	float* h_dataOut = NULL;
-	if (!pinnedMemory)
-	{
-		// Pageable
-		h_dataIn = static_cast<float*>
-				(malloc(static_cast<size_t>(numElements * sizeof(*h_dataIn))));
-		h_dataOut = static_cast<float*>
-				(malloc(static_cast<size_t>(sizeof(*h_dataOut))));
-	}
-	else
-	{
-		// Pinned
-		cudaMallocHost(&h_dataIn, 
-				static_cast<size_t>(numElements * sizeof(*h_dataIn)));
-		cudaMallocHost(&h_dataOut, 
-				static_cast<size_t>(sizeof(*h_dataOut)));
-	}
-	// Init host data
-	*h_dataOut = 0;
-	for(int i=0; i<numElements; i++){
-		h_dataIn[i] = 1.;
-	}
-
-	// Device Memory
-	float* d_dataIn = NULL;
-	float* d_intermediateSums = NULL;
-	float* d_dataOut = NULL;
-	cudaMalloc(&d_dataIn, 
-			static_cast<size_t>(numElements * sizeof(*d_dataIn)));
-	cudaMalloc(&d_dataOut, 
-			static_cast<size_t>(sizeof(*d_dataOut)));
-
-	if (h_dataIn == NULL || h_dataOut == NULL ||
-		d_dataIn == NULL || d_dataOut == NULL)
-	{
-		std::cout << "\033[31m***" << std::endl
-		          << "*** Error - Memory allocation failed" << std::endl
-		          << "***\033[0m" << std::endl;
-
-		exit(-1);
-	}
-
-	//
-	// Copy Data to the Device
-	//
-	memCpyH2DTimer.start();
-
-	cudaMemcpy(d_dataIn, h_dataIn, 
-			static_cast<size_t>(numElements * sizeof(*d_dataIn)), 
-			cudaMemcpyHostToDevice);
-	cudaMemcpy(d_dataOut, h_dataOut, 
-			static_cast<size_t>(sizeof(*d_dataOut)), 
-			cudaMemcpyHostToDevice);
-
-	memCpyH2DTimer.stop();
-
-	//
-	// Get Kernel Launch Parameters
-	//
-	int blockSize = 0,
-		gridSize = 0;
-
-	// Block Dimension / Threads per Block
-	chCommandLineGet<int>(&blockSize,"t", argc, argv);
-	chCommandLineGet<int>(&blockSize,"threads-per-block", argc, argv);
-	blockSize = blockSize != 0 ?
-			blockSize : DEFAULT_BLOCK_DIM;
-
-	if (blockSize > 1024)
-	{
-		std::cout << "\033[31m***" << std::endl
-		          << "*** Error - The number of threads per block is too big" << std::endl
-		          << "***\033[0m" << std::endl;
-
-		exit(-1);
-	}
-
-	bool improved = chCommandLineGetBool("improved", argc, argv);
-
-	if (improved){
-		gridSize = ceil(static_cast<float>(numElements) / (static_cast<float>(blockSize) * 2));
-	}
-	else{
-		gridSize = ceil(static_cast<float>(numElements) / static_cast<float>(blockSize));
-	}
-
-	if (gridSize > 1024){
-		gridSize = 1024;
-	}
-
-	cudaMalloc(&d_intermediateSums, 
-		static_cast<size_t>(gridSize * sizeof(*d_intermediateSums)));
-
-	dim3 grid_dim = dim3(gridSize);
-	dim3 block_dim = dim3(blockSize);
-
-	float CPU_result = CPU_reduction(numElements, h_dataIn);
-
-	//Warmup kernel
-	reduction_Kernel_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
-
-	kernelTimer.start();
-	
-	if(!chCommandLineGetBool("thrust", argc, argv)){
-		if(!improved){
-			reduction_Kernel_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
-			cudaDeviceSynchronize();
-			reduction_Kernel_Wrapper(dim3(1), grid_dim, gridSize, d_intermediateSums, d_dataOut);
+		// Load 64 bit bitmask section and count bits
+		unsigned int original_data = 0;
+		if (elementId < numElements) {
+			original_data = __popcll(input[elementId]);
 		}
-		else{
-			reduction_Kernel_improved_Wrapper(grid_dim, block_dim, numElements, d_dataIn, d_intermediateSums);
-			cudaDeviceSynchronize();
-			reduction_Kernel_improved_Wrapper(1, dim3(grid_dim.x / 2), gridSize, d_intermediateSums, d_dataOut);
+		unsigned int thread_data;
+
+		// Collectively compute the block-wide exclusive sum
+		BlockScan(temp_storage).ExclusiveSum(original_data, thread_data, aggregate);
+
+		// First thread of each warp writes in layer 1
+		if (((threadIdx.x & 31) == 0) && (elementId < numElements)) {
+			reinterpret_cast<unsigned short*>(input)[numElements*4+elementId/32] = static_cast<unsigned short>(thread_data + aggregateSum);
 		}
-	} else{
-		thrust_reduction_Wrapper(numElements, d_dataIn, d_dataOut);
+
+		// Accumulate the aggregate for the next iteration of the loop 
+		aggregateSum += aggregate;
 	}
 
-	// Synchronize
-	cudaDeviceSynchronize();
-
-	// Check for Errors
-	cudaError_t cudaError = cudaGetLastError();
-	if (cudaError != cudaSuccess)
-	{
-		std::cout << "\033[31m***" << std::endl
-				  << "***ERROR*** " << cudaError << " - " << cudaGetErrorString(cudaError)
-				  	<< std::endl
-				  << "***\033[0m" << std::endl;
-
-		return -1;
+	// Last thread of each full block writes into layer 2
+	if ((threadIdx.x == blockDim.x - 1) && (elementId < numElements)) {
+		int offset = numElements*2 + ((numElements+31)/32 + 1)/2;
+		reinterpret_cast<unsigned int*>(input)[offset+blockIdx.x] = aggregateSum;
 	}
-
-	kernelTimer.stop();
-
-	//
-	// Copy Back Data
-	//
-	memCpyD2HTimer.start();
-
-	cudaMemcpy(h_dataOut, d_dataOut, 
-			static_cast<size_t>(sizeof(*d_dataOut)), 
-			cudaMemcpyDeviceToHost);
-
-	memCpyD2HTimer.stop();
-
-	if ((h_dataOut[0] - CPU_result) / (h_dataOut[0] * CPU_result) < 1e-5){
-		std::cout << "Result correct!" << std::endl;
-	}
-	else{
-		std::cout << "Result NOT correct!" << std::endl;
-	}
-
-	// Print Meassurement Results
-	std::cout << "***" << std::endl
-			  << "*** Results:" << std::endl
-			  << "***    h_dataOut: " << *h_dataOut << std::endl
-			  << "***    Num Elements: " << numElements << std::endl
-			  << "***    Time to Copy to Device: " << 1e3 * memCpyH2DTimer.getTime()
-			  	<< " ms" << std::endl
-			  << "***    Copy Bandwidth: " 
-			  	<< 1e-9 * memCpyH2DTimer.getBandwidth(numElements * sizeof(*h_dataIn))
-			  	<< " GB/s" << std::endl
-			  << "***    Time to Copy from Device: " << 1e3 * memCpyD2HTimer.getTime()
-			  	<< " ms" << std::endl
-			  << "***    Copy Bandwidth: " 
-			  	<< 1e-9 * memCpyD2HTimer.getBandwidth(sizeof(*h_dataOut))
-				<< " GB/s" << std::endl
-			  << "***    Time for Reduction: " << 1e3 * kernelTimer.getTime()
-				  << " ms" << std::endl
-			  << "***    Sustained bandwidth: " << 1e-9 * kernelTimer.getBandwidth(numElements * sizeof(*d_dataIn))
-				  << " GB/s" << std::endl
-			  << "***" << std::endl;
-
-	// Free Memory
-	if (!pinnedMemory)
-	{
-		free(h_dataIn);
-		free(h_dataOut);
-	}
-	else
-	{
-		cudaFreeHost(h_dataIn);
-		cudaFreeHost(h_dataOut);
-	}
-	cudaFree(d_dataIn);
-	cudaFree(d_dataOut);
-	
-	return 0;
 }
 
-void
-printHelp(char * argv)
+template <int blockSize>
+__global__ void
+setupKernel2(int numElements, unsigned int *input, bool next=true, bool nextButOne=true)
 {
-	std::cout << "Help:" << std::endl
-			  << "  Usage: " << std::endl
-			  << "  " << argv << " [-p] [--thrust] [-s <num-elements>] [-t <threads_per_block>]"
-			  	<< std::endl
-			  << "" << std::endl
-			  << "  -p|--pinned-memory" << std::endl
-			  << "	Use pinned Memory instead of pageable memory" << std::endl
-			  << "" << std::endl
-			  << "  --thrust" << std::endl
-			  << "	Use CUDA Thrust reduction instead of custom kernel" << std::endl
-			  << "" << std::endl
-			  << "  -s <num-elements>|--size <num-elements>" << std::endl
-			  << "	The size of the Matrix" << std::endl
-			  << "" << std::endl
-			  << "  -t <threads_per_block>|--threads-per-block <threads_per_block>" 
-			  	<< std::endl
-			  << "	The number of threads per block" << std::endl
-			  << "" << std::endl;
+	int iterations = (1023 + blockDim.x) / blockDim.x;
+
+	unsigned int aggregateSum = 0;
+	unsigned int aggregate = 0;
+
+	using BlockScan = cub::BlockScan<unsigned int, blockSize>;
+	__shared__ typename BlockScan::TempStorage temp_storage;
+
+	unsigned int elementId = 0;
+	for (int i = 0; i < iterations; i++) {
+		elementId = blockIdx.x * 1024 + i * blockDim.x + threadIdx.x;
+
+		// Load prepared values from previous kernel
+		unsigned int original_data = 0;
+		if (elementId < numElements) {
+			original_data = input[elementId];
+		}
+		unsigned int thread_data;
+
+		// Collectively compute the block-wide exclusive sum over the prepared values
+		BlockScan(temp_storage).ExclusiveSum(original_data, thread_data, aggregate);
+
+		// The value in thread_data stored by the first thread in a warp needs to be subtracted
+		// from the values each thread in the warp has, to get the correct values for the next value.
+		// Doing it this way allows us to simultaneously prepare the next but one layer.
+		unsigned int correction = thread_data;
+		correction = __shfl_sync(0xffffffff, correction, 0);
+
+		// Every thread needs to rewrite own value, to correct current layer
+		if (elementId < numElements)
+			input[elementId] = thread_data - correction;
+
+		// First thread of each warp writes in next layer. These values are already fully correct.
+		if (next && ((threadIdx.x & 31)) == 0 && (elementId < numElements)) {
+			input[numElements+(elementId/32)] = thread_data + aggregateSum;
+		}
+
+		// Accumulate the aggregate for the next iteration of the loop 
+		aggregateSum += aggregate;
+	}
+
+	// Last thread of each full block writes into next but one layer. These values need to be corrected.
+	if (nextButOne && (threadIdx.x == blockDim.x - 1) && (elementId < numElements)) {
+		int offset = numElements + (numElements+31)/32;
+		input[offset+blockIdx.x] = aggregateSum;
+	}
 }
+
+__global__ void
+improvedApply(int numPacked, int *permutation, int bitmaskSize, TreeStructure structure)
+{
+	int elementIdx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (elementIdx < numPacked) {
+		uint32_t bitsToFind = elementIdx+1;
+
+		int nextLayerOffset = 0;
+		for (int layerIdx = 4; layerIdx > 1; layerIdx--) {
+			int layerSize = structure.layerSizes[layerIdx] - nextLayerOffset;
+			if (layerSize > 1) {
+				layerSize = min(layerSize, 32);
+				uint32_t *layer = &structure.layers[layerIdx][nextLayerOffset];
+
+				// Index and step for binary search
+				int searchIndex = layerSize / 2;
+				int searchStep = (layerSize + 1) / 2;
+
+				uint32_t layerSum = static_cast<uint32_t>(layer[searchIndex]);
+
+				while (searchStep > 1){
+					searchStep = (searchStep + 1) / 2;
+					searchIndex = (layerSum < bitsToFind) ? searchIndex + searchStep : searchIndex - searchStep;
+					searchIndex = (searchIndex < 0) ? 0 : ((searchIndex < layerSize) ? searchIndex : layerSize - 1);
+					layerSum = static_cast<uint32_t>(layer[searchIndex]);
+				}
+				// After binary search we either landed on the correct value or the one above
+				// So we have to check if the result is correct and if not go to the value below
+				if ((layerSum >= bitsToFind) && (searchIndex > 0)){
+					searchIndex--;
+					layerSum = static_cast<uint32_t>(layer[searchIndex]);
+				}
+
+				if (layerSum < bitsToFind) {
+					bitsToFind -= layerSum;
+					nextLayerOffset += searchIndex;
+				}
+				nextLayerOffset *= 32;
+			}
+		}
+
+		// Handle layer 1
+		int layerSize = structure.layerSizes[1] - nextLayerOffset;
+		if (layerSize > 1) {
+			layerSize = min(layerSize, 32);
+			uint16_t *layer = &reinterpret_cast<uint16_t *>(structure.layers[1])[nextLayerOffset];
+
+			// Index and step for binary search
+			int searchIndex = layerSize / 2;
+			int searchStep = (layerSize + 1) / 2;
+
+			uint32_t layerSum = static_cast<uint32_t>(layer[searchIndex]);
+
+			while (searchStep > 1){
+				searchStep = (searchStep + 1) / 2;
+				searchIndex = (layerSum < bitsToFind) ? searchIndex + searchStep : searchIndex - searchStep;
+				searchIndex = (searchIndex < 0) ? 0 : ((searchIndex < layerSize) ? searchIndex : layerSize - 1);
+				layerSum = static_cast<uint32_t>(layer[searchIndex]);
+			}
+			// After binary search we either landed on the correct value or the one above
+			// So we have to check if the result is correct and if not go to the value below
+			if ((layerSum >= bitsToFind) && (searchIndex > 0)){
+				searchIndex--;
+				layerSum = static_cast<uint32_t>(layer[searchIndex]);
+			}
+
+			if (layerSum < bitsToFind) {
+				bitsToFind -= layerSum;
+				nextLayerOffset += searchIndex;
+			}
+			nextLayerOffset *= 32;
+		}
+
+		// Handle virtual layer 0 (before bitmask)
+		uint64_t bitmaskSection;
+		layerSize = structure.layerSizes[0]/2 - nextLayerOffset;
+		layerSize = min(layerSize, 32);
+		uint64_t *bitLayer = &reinterpret_cast<uint64_t *>(structure.layers[0])[nextLayerOffset];
+		for (int i = 0; i < layerSize; i++) {
+			bitmaskSection = bitLayer[i];
+			int sectionSum = __popcll(bitmaskSection);
+			if (bitsToFind <= sectionSum) break;
+			bitsToFind -= sectionSum;
+			nextLayerOffset++;
+		}
+
+		// Handle bitmask
+		int expandedIndex = nextLayerOffset * 64;
+		for (int k = sizeof(long)*8-1; k >= 0; k--) {
+			if ((bitmaskSection >> k) & 1) {
+				if (--bitsToFind == 0) {
+					expandedIndex += ((sizeof(long)*8-1)-k);
+					break;
+				}
+			}
+		}
+		permutation[elementIdx] = expandedIndex;
+	}
+}
+
+// layerSize calculates the amount of elements per layer, regardless of the actual size on disk.
+// For the bitmask, we return the amount of integers.
+int layerSize(int layer, int bitmaskSize) {
+	int size = bitmaskSize * 2; // Bitmask size is size in long
+
+	int factor = 1;
+	for (int i = layer; i > 0; i--) {
+		factor *= 32;
+	}
+
+	if (layer > 0) {
+		size = (bitmaskSize+factor-1)/factor;
+	}
+
+	return size;
+}
+
+int layerOffsetInt(int layer, int bitmaskSize) {
+	if (layer == 0) return 0;
+
+	int offset = 0;
+	for (int i = 0; i < layer; i++) {
+		int size = layerSize(i, bitmaskSize);
+		if (i == 1) size = (size+1)/2;
+		offset += size;
+	}
+	return offset;
+}
+
+class Tree115 : public EncodingBase {
+	private:
+		uint64_t *d_bitmask;
+		int n;
+	
+	public:
+		void setup(uint64_t *d_bitmask, int n) {
+			//Calculationg layer sizes
+			int size_layer1 = layerSize(1, n);
+			int size_layer2 = layerSize(2, n);
+			int size_layer3 = layerSize(3, n);
+			int size_layer4 = layerSize(4, n);
+
+			printf("running first kernel...\n");
+			ChTimer setupTimer;
+
+			setupTimer.start();
+			setupKernel1<1024><<<(n+1023)/1024, 1024>>>(n, reinterpret_cast<long*>(d_bitmask));
+			setupTimer.stop();
+
+			printf("first kernel ran for %f ms\n", 1e3 * setupTimer.getTime());
+			printf("with a bandwidth of %f GB/s\n", 1e-9 * setupTimer.getBandwidth(n * sizeof(long) + size_layer1 * sizeof(short) + size_layer2 * sizeof(int)));
+
+			if (layerSize(2, n) > 0) {
+				printf("running second kernel...\n");
+				int offset = layerOffsetInt(2, n);
+				setupTimer.start();
+				setupKernel2<1024><<<(size+1023)/1024, 1024>>>(size_layer2, &reinterpret_cast<uint32_t*>(d_bitmask)[offset]);
+				setupTimer.stop();
+				printf("second kernel ran for %f ms\n", 1e3 * setupTimer.getTime());
+				printf("with a bandwidth of %f GB/s\n", 1e-9 * setupTimer.getBandwidth(size_layer3 * sizeof(int) + size_layer2 * sizeof(int)));
+			}
+
+			if (layerSize(4, n) > 0) {
+				printf("running third kernel...\n");
+				int offset = layerOffsetInt(4, n);
+				setupTimer.start();
+				setupKernel2<1024><<<(size+1023)/1024, 1024>>>(size_layer4, &reinterpret_cast<uint32_t*>(d_bitmask)[offset], false, false);
+				setupTimer.stop();
+				printf("third kernel ran for %f ms\n", 1e3 * setupTimer.getTime());
+				printf("with a bandwidth of %f GB/s\n", 1e-9 * setupTimer.getBandwidth(size_layer4 * sizeof(int) + size_layer3 * sizeof(int)));
+			}
+
+			this->d_bitmask = d_bitmask;
+			this->n = n;
+		};
+
+		void apply(int *permutation, int packedSize) {
+			TreeStructure ts;
+
+			uint32_t *d_bitmask_int = reinterpret_cast<uint32_t*>(d_bitmask);
+			for (int layer = 0; layer < 5; layer++) {
+				ts.layers[layer] = &d_bitmask_int[layerOffsetInt(layer, n)];
+				ts.layerSizes[layer] = layerSize(layer, n);
+			}
+
+			improvedApply<<<(packedSize+127)/128, 128>>>(packedSize, permutation, n, ts);
+		};
+	
+		void print(uint64_t *h_bitmask) {
+			// Print bitmask
+			if (n < 100) {
+				std::cout << "bitmask: ";
+				for (int i = 0; i < n; i++) {
+					uint64_t v = h_bitmask[i];
+					for (int k = sizeof(long)*8-1; k >= 0; k--) {
+						std::cout << ((v >> k) & 1) << "";
+					}
+				}
+				std::cout << std::endl;
+			}
+
+			// Print first layer (short)
+			if (layerSize(1, n) < 500) {
+				int offset = layerOffsetInt(1, n) * 2;
+				std::cout << "layer 1: ";
+				for (int i = offset; i < offset+layerSize(1, n); i++) {
+					std::cout << reinterpret_cast<uint16_t*>(h_bitmask)[i] << " ";
+				}
+				std::cout << std::endl;
+			}
+
+			// Print second layer layer (int)
+			uint32_t *intTree = reinterpret_cast<uint32_t*>(h_bitmask);
+			if (layerSize(2, n) < 500) {
+				int offset = layerOffsetInt(2, n);
+				std::cout << "layer 2: ";
+				for (int i = offset; i < offset+layerSize(2, n); i++) {
+					std::cout << intTree[i] << " ";
+				}
+				std::cout << std::endl;
+			}
+
+			// Print third layer layer (int)
+			if (layerSize(3, n) < 500) {
+				int offset = layerOffsetInt(3, n);
+				std::cout << "layer 3: ";
+				for (int i = offset; i < offset+layerSize(3, n); i++) {
+					std::cout << intTree[i] << " ";
+				}
+				std::cout << std::endl;
+			}
+
+			// Print fourth layer layer (int)
+			int offset = layerOffsetInt(4, n);
+			std::cout << "layer 4: ";
+			for (int i = offset; i < offset+layerSize(4, n); i++) {
+				std::cout << intTree[i] << " ";
+			}
+			std::cout << std::endl;
+		};
+};
